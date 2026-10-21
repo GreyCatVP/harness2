@@ -32,8 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from . import context, recursion, runmark, selection
 from . import library as library_store
-from . import recursion, runmark, selection
 from . import tree as harness_tree
 from .proposer import Proposer
 from .spec import BenchmarkAdapter, RunView
@@ -629,6 +629,18 @@ def run_task(
     if not any(b.ok for b in base):
         res.status = "base-failed"
         res.errors.append("no base rollout produced anything")
+        _write_summary(summary_path, res)
+        return res
+
+    leaked = context.answer_key_runs(adapter, base, context.answer_key_for(adapter, task_id))
+    if leaked:
+        res.status = "contaminated"
+        res.errors.extend(
+            f"{label}: {where}; no model was shown this task. Restrict the executor's egress "
+            f"(docs/EXPERIMENTS.md#web-access) and re-run under a new HARNESS2_RUNS_DIR: "
+            f"completed reference executions are reused"
+            for label, where in leaked.items()
+        )
         _write_summary(summary_path, res)
         return res
 
