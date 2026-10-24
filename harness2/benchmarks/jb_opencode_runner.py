@@ -208,8 +208,13 @@ def _attempt(
     return code
 
 
-def run_one(cfg: Settings, task_id: str) -> bool:
+def run_one(cfg: Settings, task_id: str, *, stage=_stage, run=_attempt) -> bool:
     """Roll one task; the existing-output skip mirrors the adapter's resume, for direct runs.
+
+    `stage` and `run` are the agent-specific steps; jb_cli_runner swaps in its own.
+
+    An attempt that exits non-zero, other than a timeout, never delivers: its partial
+    output moves beside its trajectory as `<attempt>.partial/` and the next attempt runs.
 
     True only when deliverables landed in `model_output/<label>/`. A rollout that dies
     on auth or the proxy still writes a trajectory, so the caller must not read one as
@@ -234,18 +239,26 @@ def run_one(cfg: Settings, task_id: str) -> bool:
 
     workspace = TEMP_BASE / f"{task_name}_{cfg.label}_{os.getpid()}"
     output_dir = workspace / "output"
-    _stage(task_dir, cfg.render_dir, workspace)
+    stage(task_dir, cfg.render_dir, workspace)
 
     for attempt in range(1, cfg.max_retries + 1):
         if attempt > 1:
             _reset_task(task_dir, workspace)
         traj_file = traj_dir / f"{task_name}_{cfg.label}_attempt{attempt}_{_stamp()}.jsonl"
         _log(log_file, f"[{_hms()}] run {task_id} ({cfg.label}) attempt {attempt} -> {traj_file}")
-        code = _attempt(cfg, workspace, traj_file, log_file, task_name, attempt)
-        if _nonempty(output_dir):
-            break
+        code = run(cfg, workspace, traj_file, log_file, task_name, attempt)
         if code in (124, 137):
             _log(log_file, f"[{_hms()}] TIMEOUT {task_id} attempt {attempt}")
+        elif code != 0 and _nonempty(output_dir):
+            # A crash is not the agent's own result: keep its files for inspection, retry.
+            partial = traj_file.with_suffix(".partial")
+            shutil.move(str(output_dir), str(partial))
+            output_dir.mkdir()
+            _log(
+                log_file, f"[{_hms()}] FAILED (exit {code}) {task_id} attempt {attempt}; {partial}"
+            )
+        if _nonempty(output_dir):
+            break
 
     delivered = _nonempty(output_dir)
     if delivered:
